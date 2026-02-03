@@ -1,86 +1,107 @@
 // analyzers/epsAnalyzer.js
+//
+// Analyse un fichier EPS et renvoie son bounding box + dimensions en mm.
+// - 1er essai : lecture du header %%BoundingBox
+// - fallback : calcul via Ghostscript (bbox rendu)
+
 const fs = require('fs');
-const path = require('path');
 const { exec } = require('child_process');
 
-// Analyse les dimensions EPS
-async function analyzeEPS(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8');
-  const match = content.match(/%%BoundingBox: (\d+) (\d+) (\d+) (\d+)/);
-  if (!match) throw new Error('BoundingBox introuvable');
+// Choix de la commande Ghostscript selon l'OS
+const GS_CMD = process.platform === 'win32' ? 'gswin64c' : 'gs';
 
-  const [, x1, y1, x2, y2] = match.map(Number);
-  const widthPt = x2 - x1;
-  const heightPt = y2 - y1;
-  const width_mm = (widthPt * 25.4) / 72;
-  const height_mm = (heightPt * 25.4) / 72;
-
-  return {
-    type: 'EPS',
-    width_mm: +width_mm.toFixed(2),
-    height_mm: +height_mm.toFixed(2),
-  };
+// Conversion points → millimètres
+function ptToMm(pt) {
+  return (pt * 25.4) / 72;
 }
 
-// Modifie l'EPS si nécessaire (ajout de marge de 2mm)
-async function modifyEPS(filePath) {
-  let content = fs.readFileSync(filePath, 'utf8');
-  const match = content.match(/%%BoundingBox: (\d+) (\d+) (\d+) (\d+)/);
-  if (!match) throw new Error('BoundingBox introuvable');
-
-  let [, x1, y1, x2, y2] = match.map(Number);
-  const widthPt = x2 - x1;
-  const heightPt = y2 - y1;
-
-  const width_mm = (widthPt * 25.4) / 72;
-  const height_mm = (heightPt * 25.4) / 72;
-
-  const artboardW = Math.round(width_mm);
-  const artboardH = Math.round(height_mm);
-
-  if (
-    artboardW === Math.round(width_mm) &&
-    artboardH === Math.round(height_mm)
-  ) {
-    const marginPt = (2 * 72) / 25.4;
-    const newX1 = Math.round(x1 - marginPt);
-    const newY1 = Math.round(y1 - marginPt);
-    const newX2 = Math.round(x2 + marginPt);
-    const newY2 = Math.round(y2 + marginPt);
-
-    content = content.replace(
-      /%%BoundingBox: (\d+) (\d+) (\d+) (\d+)/,
-      `%%BoundingBox: ${newX1} ${newY1} ${newX2} ${newY2}`
-    );
-
-    const dir = path.join(__dirname, '../modified');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    const outputPath = path.join(dir, `${Date.now()}_modified.eps`);
-    fs.writeFileSync(outputPath, content, 'binary');
-    return outputPath;
-  }
-
-  return null;
-}
-
-// Conversion EPS vers PDF avec Ghostscript
-async function convertEPStoPDF(epsPath) {
-  const pdfDir = path.join(__dirname, '../pdfs');
-  if (!fs.existsSync(pdfDir)) fs.mkdirSync(pdfDir, { recursive: true });
-
-  const pdfFilePath = path.join(pdfDir, `${Date.now()}_converted.pdf`);
-  const command = `gswin64c -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sOutputFile="${pdfFilePath.replace(/\\/g, '/')}" "${epsPath.replace(/\\/g, '/')}"`;
+// Fallback : calcul du bbox via Ghostscript (sDEVICE=bbox)
+function runGhostscriptBBox(filePath) {
   return new Promise((resolve, reject) => {
-    exec(command, (error) => {
-      if (error) reject(error);
-      else resolve(pdfFilePath);
+    const command = `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH -sDEVICE=bbox "${filePath}"`;
+
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Ghostscript bbox error:', stderr || error.message);
+        return reject(new Error('Ghostscript bbox failed'));
+      }
+
+      // On cherche la première HiResBoundingBox
+      const match = stderr.match(
+        /%%HiResBoundingBox:\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/
+      );
+
+      if (!match) {
+        return reject(new Error('No HiResBoundingBox found in Ghostscript output'));
+      }
+
+      const [, llxStr, llyStr, urxStr, uryStr] = match;
+      const llx = parseFloat(llxStr);
+      const lly = parseFloat(llyStr);
+      const urx = parseFloat(urxStr);
+      const ury = parseFloat(uryStr);
+
+      const widthPt = urx - llx;
+      const heightPt = ury - lly;
+
+      resolve({
+        source: 'ghostscript',
+        llx,
+        lly,
+        urx,
+        ury,
+        widthPt,
+        heightPt,
+        width_mm: +ptToMm(widthPt).toFixed(2),
+        height_mm: +ptToMm(heightPt).toFixed(2)
+      });
     });
   });
 }
 
+// Analyse les dimensions EPS
+async function analyzeEPS(filePath) {
+  // 1) Tentative lecture directe du header %%BoundingBox
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const match = content.match(/%%BoundingBox:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/);
+
+    if (match) {
+      const [, x1Str, y1Str, x2Str, y2Str] = match;
+      const x1 = parseFloat(x1Str);
+      const y1 = parseFloat(y1Str);
+      const x2 = parseFloat(x2Str);
+      const y2 = parseFloat(y2Str);
+
+      const widthPt = x2 - x1;
+      const heightPt = y2 - y1;
+
+      return {
+        format: 'eps',
+        source: 'eps_header',
+        llx: x1,
+        lly: y1,
+        urx: x2,
+        ury: y2,
+        widthPt,
+        heightPt,
+        width_mm: +ptToMm(widthPt).toFixed(2),
+        height_mm: +ptToMm(heightPt).toFixed(2)
+      };
+    }
+  } catch (err) {
+    console.warn('Erreur lecture EPS (header):', err.message);
+    // on tombera en fallback GS
+  }
+
+  // 2) Fallback : calcul via Ghostscript
+  const bbox = await runGhostscriptBBox(filePath);
+  return {
+    format: 'eps',
+    ...bbox
+  };
+}
+
 module.exports = {
-  analyzeEPS,
-  modifyEPS,
-  convertEPStoPDF
+  analyzeEPS
 };

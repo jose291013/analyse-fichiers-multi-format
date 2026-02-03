@@ -1,4 +1,6 @@
-// server.js - Version complète et corrigée
+// server.js - Version simplifiée multi-format
+// Objectif : calculer le bounding box (en mm) pour EPS, PDF, AI, SVG
+
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
@@ -6,266 +8,191 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 
-// Fonction pour générer une miniature d'un EPS en PNG en utilisant Ghostscript
-// Fonction pour générer une miniature d'un EPS en PNG recadré (rogne l'espace blanc)
-// Utilise Ghostscript pour générer un PNG temporaire avec -dEPSCrop, puis ImageMagick pour le trimming.
-const generateThumbnail = (inputEPS, outputImage) => new Promise((resolve, reject) => {
-  // Définir un chemin temporaire en remplaçant _thumb.png par _temp.png dans le nom de sortie
-  const tempImage = outputImage.replace('_thumb.png', '_temp.png');
+// On réutilise ton nouvel analyseur EPS propre
+const { analyzeEPS } = require('./analyzers/epsAnalyzer');
 
-  // Étape 1 : Génération du PNG temporaire avec Ghostscript (en tenant compte de la bounding box)
-  const gsCommand = `gs -dNOPAUSE -dBATCH -dEPSCrop -sDEVICE=pngalpha -r150 -dFirstPage=1 -dLastPage=1 -sOutputFile="${tempImage}" "${inputEPS}"`;
-  exec(gsCommand, (error, stdout, stderr) => {
-    if (error) {
-      console.error("Erreur Ghostscript:", stderr);
-      return reject(new Error("Échec génération temporaire du thumbnail"));
-    }
-    // Étape 2 : Rogner le PNG temporaire avec ImageMagick pour supprimer les espaces blancs
-    const convertCommand = `convert "${tempImage}" -trim +repage "${outputImage}" && rm "${tempImage}"`;
-    exec(convertCommand, (err2, stdout2, stderr2) => {
-      if (err2) {
-        console.error("Erreur ImageMagick:", stderr2);
-        return reject(new Error("Échec du trimming avec ImageMagick"));
-      }
-      resolve(outputImage);
-    });
-  });
-});
-
+// Choix de la commande Ghostscript selon OS
+const GS_CMD = process.platform === 'win32' ? 'gswin64c' : 'gs';
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
+app.use(express.json());
 
-
-// Base URL de votre service Render
-const baseUrl = process.env.BASE_URL || "https://analyse-fichiers-clean.onrender.com";
-
-// Configuration des répertoires
-const directories = [
-  path.join(__dirname, 'modified'),
-  path.join(__dirname, 'pdfs'),
-  path.join(__dirname, 'uploads')
-];
-
-directories.forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
-
-const upload = multer({ 
-  dest: 'uploads/',
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB max
-});
-
-// 1. Analyse EPS (inchangée mais optimisée)
-const analyzeEPS = (filePath) => {
-  try {
-    const content = fs.readFileSync(filePath, 'utf8');
-    const match = content.match(/%%BoundingBox: (\d+) (\d+) (\d+) (\d+)/);
-    if (!match) throw new Error('BoundingBox introuvable');
-
-    const [, x1, y1, x2, y2] = match.map(Number);
-    const toMM = (pt) => +((pt * 25.4 / 72).toFixed(2));
-
-    return {
-      width_mm: toMM(x2 - x1),
-      height_mm: toMM(y2 - y1)
-    };
-  } catch (err) {
-    console.error('Erreur analyse EPS:', err);
-    throw new Error('Fichier EPS invalide');
-  }
-};
-
-// 2. Modification EPS (ajout de logs)
-const modifyEPS = (filePath) => {
-  try {
-    const content = fs.readFileSync(filePath, 'binary');
-    const match = content.match(/%%BoundingBox: (\d+) (\d+) (\d+) (\d+)/);
-    if (!match) return null;
-
-    let [, x1, y1, x2, y2] = match.map(Number);
-    const marginPt = (2 * 72) / 25.4;
-
-    const newContent = content.replace(
-      /%%BoundingBox: (\d+) (\d+) (\d+) (\d+)/,
-      `%%BoundingBox: ${Math.round(x1 - marginPt)} ${Math.round(y1 - marginPt)} ${Math.round(x2 + marginPt)} ${Math.round(y2 + marginPt)}`
-    );
-
-    const outputPath = path.join(__dirname, 'modified', `${Date.now()}_modified.eps`);
-    fs.writeFileSync(outputPath, newContent, 'binary');
-    return outputPath;
-  } catch (err) {
-    console.error('Erreur modification EPS:', err);
-    return null;
-  }
-};
-
-// 3. Conversion EPS → PDF (avec gestion d'erreur améliorée)
-const convertEPStoPDF = (inputEPS) => new Promise((resolve, reject) => {
-  const outputPDF = path.join(__dirname, 'pdfs', `${Date.now()}.pdf`);
-  const command = `gs -dNOPAUSE -dBATCH -dEPSCrop -sDEVICE=pdfwrite -sOutputFile="${outputPDF}" "${inputEPS}"`;
-
-  exec(command, (error, stdout, stderr) => {
-    if (error) {
-      console.error(`Erreur Ghostscript: ${stderr}`);
-      return reject(new Error('Échec conversion PDF'));
-    }
-    resolve(outputPDF);
-  });
-});
-
-// 4. Analyse PDF avec qpdf pour lire le TrimBox ou MediaBox
-app.post('/analyze-pdf', upload.single('FILE'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
-
-  const filePath = req.file.path;
-  const command = `qpdf --json "${filePath}"`;
-
-  exec(command, (err, stdout, stderr) => {
-    fs.unlinkSync(filePath); // Nettoyage du fichier temporaire
-
-    if (err) {
-      console.error('Erreur qpdf :', stderr);
-      return res.status(500).json({ error: 'Erreur lors de l’analyse PDF avec qpdf' });
-    }
-
-    try {
-      const json = JSON.parse(stdout);
-     // Nombre total de pages
-     const pageCount = Array.isArray(json.pages) ? json.pages.length : 0;
-
-      const pageRef = json.pages?.[0]?.object;
-      if (!pageRef) return res.status(500).json({ error: 'Référence page introuvable' });
-
-      let pageData;
-
-      // ✅ Correction : parcourir tous les objets de json.qpdf
-      for (const obj of json.qpdf) {
-        const key = `obj:${pageRef}`;
-        if (obj[key]) {
-          pageData = obj[key].value;
-          break;
-        }
-      }
-
-      if (!pageData) {
-        return res.status(500).json({ error: 'Objet page introuvable dans qpdf' });
-      }
-      console.log("🧩 Contenu brut de pageData :");
-      console.log(JSON.stringify(pageData, null, 2));
-      
-      let box, usedBox;
-if (Array.isArray(pageData["/TrimBox"])) {
-  box = pageData["/TrimBox"];
-  usedBox = 'TrimBox';
-} else if (Array.isArray(pageData["/MediaBox"])) {
-  box = pageData["/MediaBox"];
-  usedBox = 'MediaBox';
-} else {
-  return res.status(500).json({ error: 'Aucune box valide trouvée dans le PDF' });
+// Répertoire des uploads temporaires
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-
-      const [x1, y1, x2, y2] = box;
-      const toMM = pt => +(pt * 25.4 / 72).toFixed(2);
-
-      const dimensions = {
-        width_mm: toMM(x2 - x1),
-        height_mm: toMM(y2 - y1)
-      };
-
-           
-     // On renvoie aussi pageCount
-     return res.json({ dimensions, usedBox, pageCount });
-
-    } catch (parseErr) {
-      console.error('Erreur parsing JSON qpdf:', parseErr);
-      res.status(500).json({ error: 'Erreur parsing JSON qpdf' });
-    }
-  });
+const upload = multer({
+  dest: uploadDir,
+  limits: { fileSize: 50 * 1024 * 1024 } // 50 Mo
 });
 
-// 5. Route EPS existante (optimisée) avec génération d'une miniature
-app.post('/analyze-eps', upload.single('FILE'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
+// ---- Helpers communs ----
+
+// Conversion points → mm
+function ptToMm(pt) {
+  return (pt * 25.4) / 72;
+}
+
+// Calcul du bounding box via Ghostscript (bbox rendu)
+function runGhostscriptBBox(filePath) {
+  return new Promise((resolve, reject) => {
+    const command = `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH -sDEVICE=bbox "${filePath}"`;
+
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Ghostscript bbox error:', stderr || error.message);
+        return reject(new Error('Ghostscript bbox failed'));
+      }
+
+      // On cherche la première HiResBoundingBox
+      const match = stderr.match(
+        /%%HiResBoundingBox:\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/
+      );
+
+      if (!match) {
+        return reject(new Error('No HiResBoundingBox found in Ghostscript output'));
+      }
+
+      const [, llxStr, llyStr, urxStr, uryStr] = match;
+      const llx = parseFloat(llxStr);
+      const lly = parseFloat(llyStr);
+      const urx = parseFloat(urxStr);
+      const ury = parseFloat(uryStr);
+
+      const widthPt = urx - llx;
+      const heightPt = ury - lly;
+
+      resolve({
+        llx,
+        lly,
+        urx,
+        ury,
+        widthPt,
+        heightPt,
+        width_mm: +ptToMm(widthPt).toFixed(2),
+        height_mm: +ptToMm(heightPt).toFixed(2),
+        source: 'ghostscript'
+      });
+    });
+  });
+}
+
+// Conversion SVG → PDF (via rsvg-convert)
+// /!\ Nécessite le binaire système `rsvg-convert` (paquet librsvg2-bin sous Debian/Ubuntu)
+function convertSvgToPdf(svgPath, pdfPath) {
+  return new Promise((resolve, reject) => {
+    const command = `rsvg-convert -f pdf -o "${pdfPath}" "${svgPath}"`;
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Erreur rsvg-convert :', stderr || error.message);
+        return reject(new Error('SVG to PDF conversion failed'));
+      }
+      resolve(pdfPath);
+    });
+  });
+}
+
+// ---- Analyseurs par type de fichier ----
+
+// PDF : bounding box du contenu rendu (page 1)
+async function analyzePDF(filePath) {
+  const bbox = await runGhostscriptBBox(filePath);
+  return {
+    format: 'pdf',
+    pageCount: 1, // tu pourras améliorer plus tard si besoin
+    ...bbox
+  };
+}
+
+// AI (Illustrator PDF-compatible) : même logique que PDF
+async function analyzeAI(filePath) {
+  const bbox = await runGhostscriptBBox(filePath);
+  return {
+    format: 'ai',
+    pageCount: 1,
+    ...bbox
+  };
+}
+
+// SVG : SVG -> PDF -> bbox Ghostscript
+async function analyzeSVG(filePath) {
+  const pdfTemp = filePath + '.tmp.pdf';
+  try {
+    await convertSvgToPdf(filePath, pdfTemp);
+    const bbox = await runGhostscriptBBox(pdfTemp);
+    return {
+      format: 'svg',
+      pageCount: 1,
+      ...bbox
+    };
+  } finally {
+    if (fs.existsSync(pdfTemp)) {
+      fs.unlinkSync(pdfTemp);
+    }
+  }
+}
+
+// ---- Route multi-format ----
+
+app.post('/analyze', upload.single('FILE'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  const filePath = req.file.path;
+  const ext = path.extname(req.file.originalname || '').toLowerCase();
 
   try {
-    const dimensions = analyzeEPS(req.file.path);
-    const modifiedPath = modifyEPS(req.file.path);
-    let pdfPath = null;
-    let thumbnailPath = null;
+    let result;
 
-    if (modifiedPath) {
-      pdfPath = await convertEPStoPDF(modifiedPath).catch(console.error);
+    if (ext === '.eps' || ext === '.ps') {
+      // EPS via ton epsAnalyzer propre
+      result = await analyzeEPS(filePath);
+    } else if (ext === '.pdf') {
+      result = await analyzePDF(filePath);
+    } else if (ext === '.ai') {
+      result = await analyzeAI(filePath);
+    } else if (ext === '.svg') {
+      result = await analyzeSVG(filePath);
+    } else {
+      return res.status(400).json({ error: `Unsupported file type: ${ext}` });
     }
 
-    // Préparation du dossier pour les miniatures (si inexistant, on le crée)
-    const thumbnailsDir = path.join(__dirname, 'thumbnails');
-    if (!fs.existsSync(thumbnailsDir)) {
-      fs.mkdirSync(thumbnailsDir, { recursive: true });
-    }
-
-    // Définir le nom du fichier thumbnail (ici basé sur un timestamp)
-    thumbnailPath = path.join(thumbnailsDir, `${Date.now()}_thumb.png`);
-
-    // Génération du thumbnail à partir du fichier EPS original
-    await generateThumbnail(req.file.path, thumbnailPath);
-
-    res.json({
-      dimensions,
-      modified: !!modifiedPath,
-      downloadLink: modifiedPath ? `${baseUrl}/download/eps/${path.basename(modifiedPath)}` : null,
-      pdfLink: pdfPath ? `${baseUrl}/download/pdf/${path.basename(pdfPath)}` : null,
-      thumbnailLink: thumbnailPath ? `${baseUrl}/download/thumbnail/${path.basename(thumbnailPath)}` : null
+    // Réponse standardisée
+    return res.json({
+      fileName: req.file.originalname,
+      ...result
     });
   } catch (err) {
-    console.error('Erreur analyse EPS:', err);
-    res.status(500).json({ error: err.message });
+    console.error('Analyze error:', err);
+    return res.status(500).json({ error: err.message || 'Analyze failed' });
   } finally {
-    if (req.file?.path) fs.unlinkSync(req.file.path);
+    // Nettoyage du fichier uploadé
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn('Erreur suppression fichier upload:', e.message);
+    }
   }
 });
-app.get('/download/thumbnail/:fileName', (req, res) => {
-  const filePath = path.join(__dirname, 'thumbnails', req.params.fileName);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Fichier miniature introuvable' });
-  res.download(filePath);
+
+// Petit endpoint de healthcheck
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'analyse-fichiers-multi-format' });
 });
 
-
-// Routes de téléchargement
-app.get('/download/eps/:fileName', (req, res) => {
-  const filePath = path.join(__dirname, 'modified', req.params.fileName);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Fichier introuvable' });
-  res.download(filePath);
-});
-
-app.get('/download/pdf/:fileName', (req, res) => {
-  const filePath = path.join(__dirname, 'pdfs', req.params.fileName);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Fichier introuvable' });
-  res.download(filePath);
-});
-
-// Middleware d'erreur global
+// Middleware d’erreur global
 app.use((err, req, res, next) => {
   console.error('Erreur globale:', err);
-  res.status(500).json({ error: 'Erreur interne du serveur' });
+  res.status(500).json({ error: 'Internal server error' });
 });
-
-
-app.get('/test-qpdf', (req, res) => {
-  exec('qpdf --version', (err, stdout) => {
-    if (err) {
-      console.error('❌ qpdf non trouvé');
-      return res.status(500).json({ error: 'qpdf non installé' });
-    }
-    res.json({ version: stdout.trim() });
-  });
-});
-
 
 app.listen(port, () => {
   console.log(`🛠️ Serveur prêt sur le port ${port}`);
-  console.log(`📁 Répertoires vérifiés: ${directories.join(', ')}`);
+  console.log(`📁 Upload dir: ${uploadDir}`);
 });

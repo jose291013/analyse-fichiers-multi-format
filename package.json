@@ -1,5 +1,5 @@
 {
-  "name": "analyse-fichiers-clean",
+  "name": "analyse-fichiers-multi-format",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
