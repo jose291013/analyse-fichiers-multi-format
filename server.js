@@ -416,19 +416,4 @@ app.listen(port, () => {
 
 
 
-// Petit endpoint de healthcheck
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'analyse-fichiers-multi-format' });
-});
 
-// Middleware d’erreur global
-app.use((err, req, res, next) => {
-  console.error('Erreur globale:', err);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-app.listen(port, () => {
-  console.log(`🛠️ Serveur prêt sur le port ${port}`);
-  console.log(`📁 Upload dir: ${uploadDir}`);
-  console.log(`📁 Converted dir: ${convertedDir}`);
-});
