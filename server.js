@@ -95,28 +95,45 @@ function runGhostscriptBBox(filePath) {
 }
 
 // Recadrer un PDF sur le bounding box avec Ghostscript
+// Recadrer un PDF sur le bounding box avec Ghostscript
 function cropPdfToBbox(inputPdfPath, outputPdfPath, bbox) {
   return new Promise((resolve, reject) => {
     const { llx, lly, widthPt, heightPt } = bbox;
 
-    // On recadre la page et on translate le contenu de -llx, -lly
-    const command =
-      `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
-      `-sDEVICE=pdfwrite ` +
-      `-sOutputFile="${outputPdfPath}" ` +
-      `-c "<< /PageSize [${widthPt} ${heightPt}] >> setpagedevice ` +
-      `${-llx} ${-lly} translate` +
-      ` " -f "${inputPdfPath}"`;
+    // On log pour diagnostiquer si besoin
+    console.log("cropPdfToBbox bbox =", { llx, lly, widthPt, heightPt });
+
+    // Commande Ghostscript :
+    //  - fixe la taille de page (DEVICEWIDTH/HEIGHTPOINTS + FIXEDMEDIA)
+    //  - translate le contenu de -llx, -lly via PageOffset
+    const parts = [
+      GS_CMD,
+      "-dSAFER",
+      "-dNOPAUSE",
+      "-dBATCH",
+      "-sDEVICE=pdfwrite",
+      `-dDEVICEWIDTHPOINTS=${widthPt}`,
+      `-dDEVICEHEIGHTPOINTS=${heightPt}`,
+      "-dFIXEDMEDIA",
+      `-sOutputFile="${outputPdfPath}"`,
+      `-c "<</PageOffset [${-llx} ${-lly}]>> setpagedevice"`,
+      `-f "${inputPdfPath}"`
+    ];
+
+    const command = parts.join(" ");
+    console.log("cropPdfToBbox command:", command);
 
     exec(command, (error, stdout, stderr) => {
       if (error) {
-        console.error('Erreur Ghostscript cropPdfToBbox :', stderr || error.message);
-        return reject(new Error('PDF crop to bbox failed'));
+        console.error("Erreur Ghostscript cropPdfToBbox :", stderr || error.message);
+        return reject(new Error("PDF crop to bbox failed"));
       }
+      console.log("cropPdfToBbox OK pour", outputPdfPath);
       resolve(outputPdfPath);
     });
   });
 }
+
 
 
 // Conversion SVG → PDF (via rsvg-convert)
