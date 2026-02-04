@@ -96,43 +96,40 @@ function runGhostscriptBBox(filePath) {
 
 // Recadrer un PDF sur le bounding box avec Ghostscript
 // Recadrer un PDF sur le bounding box avec Ghostscript
-function cropPdfToBbox(inputPdfPath, outputPdfPath, bbox) {
+// Recadrer un PDF sur un bounding box donné (sans redimensionner le contenu)
+function cropPdfToBbox(inputPdf, outputPdf, bbox) {
   return new Promise((resolve, reject) => {
     const { llx, lly, widthPt, heightPt } = bbox;
 
-    // On log pour diagnostiquer si besoin
-    console.log("cropPdfToBbox bbox =", { llx, lly, widthPt, heightPt });
+    console.log("cropPdfToBbox bbox =", bbox);
 
-    // Commande Ghostscript :
-    //  - fixe la taille de page (DEVICEWIDTH/HEIGHTPOINTS + FIXEDMEDIA)
-    //  - translate le contenu de -llx, -lly via PageOffset
-    const parts = [
-      GS_CMD,
-      "-dSAFER",
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-sDEVICE=pdfwrite",
-      `-dDEVICEWIDTHPOINTS=${widthPt}`,
-      `-dDEVICEHEIGHTPOINTS=${heightPt}`,
-      "-dFIXEDMEDIA",
-      `-sOutputFile="${outputPdfPath}"`,
-      `-c "<</PageOffset [${-llx} ${-lly}]>> setpagedevice"`,
-      `-f "${inputPdfPath}"`
-    ];
+    // On force TOUTES les box (Media/Crop/Bleed/Trim/Art) à la taille du bbox
+    const command =
+      `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
+      `-sDEVICE=pdfwrite -dFIXEDMEDIA ` +
+      `-sOutputFile="${outputPdf}" ` +
+      `-c "<</PageSize [${widthPt} ${heightPt}] ` +
+      `/MediaBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/CropBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/BleedBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/TrimBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/ArtBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/PageOffset [-${llx} -${lly}]>> setpagedevice" ` +
+      `-f "${inputPdf}"`;
 
-    const command = parts.join(" ");
     console.log("cropPdfToBbox command:", command);
 
     exec(command, (error, stdout, stderr) => {
       if (error) {
-        console.error("Erreur Ghostscript cropPdfToBbox :", stderr || error.message);
-        return reject(new Error("PDF crop to bbox failed"));
+        console.error("Erreur cropPdfToBbox :", stderr || error.message);
+        return reject(new Error("PDF crop failed"));
       }
-      console.log("cropPdfToBbox OK pour", outputPdfPath);
-      resolve(outputPdfPath);
+      console.log("cropPdfToBbox OK pour", outputPdf);
+      resolve(outputPdf);
     });
   });
 }
+
 
 
 
