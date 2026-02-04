@@ -1,5 +1,7 @@
-// server.js - Version simplifiée multi-format
-// Objectif : calculer le bounding box (en mm) pour EPS, PDF, AI, SVG
+// server.js - Version multi-format avec /analyze et /convert-to-pdf
+// Objectif :
+//  - /analyze : calculer le bounding box (en mm) pour EPS, PDF, AI, SVG
+//  - /convert-to-pdf : convertir SVG / AI en PDF et exposer le fichier final
 
 const express = require('express');
 const multer = require('multer');
@@ -8,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 
-// On réutilise ton nouvel analyseur EPS propre
+// On réutilise ton analyseur EPS propre
 const { analyzeEPS } = require('./analyzers/epsAnalyzer');
 
 // Choix de la commande Ghostscript selon OS
@@ -26,9 +28,19 @@ if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
+// Répertoire des fichiers convertis (PDF finaux)
+const convertedDir = path.join(__dirname, 'converted');
+if (!fs.existsSync(convertedDir)) {
+  fs.mkdirSync(convertedDir, { recursive: true });
+}
+
+// Servir les PDF convertis en statique sous /converted/...
+app.use('/converted', express.static(convertedDir));
+
+// Multer : 100 Mo max
 const upload = multer({
   dest: uploadDir,
-  limits: { fileSize: 50 * 1024 * 1024 } // 50 Mo
+  limits: { fileSize: 100 * 1024 * 1024 } // 100 Mo
 });
 
 // ---- Helpers communs ----
@@ -97,6 +109,20 @@ function convertSvgToPdf(svgPath, pdfPath) {
   });
 }
 
+// Conversion AI (Illustrator PDF-compatible) → PDF via Ghostscript
+function convertAiToPdf(aiPath, pdfPath) {
+  return new Promise((resolve, reject) => {
+    const command = `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sOutputFile="${pdfPath}" "${aiPath}"`;
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Erreur Ghostscript AI->PDF :', stderr || error.message);
+        return reject(new Error('AI to PDF conversion failed'));
+      }
+      resolve(pdfPath);
+    });
+  });
+}
+
 // ---- Analyseurs par type de fichier ----
 
 // PDF : bounding box du contenu rendu (page 1)
@@ -130,16 +156,11 @@ async function analyzeSVG(filePath) {
     await convertSvgToPdf(filePath, pdfTemp);
     const raw = await runGhostscriptBBox(pdfTemp);
 
-    // Corriger les dimensions (on garde llx/lly/urx/ury pour debug si tu veux)
     const widthPtCorrected = raw.widthPt * SVG_DPI_FACTOR;
     const heightPtCorrected = raw.heightPt * SVG_DPI_FACTOR;
 
-    const widthMmCorrected = +(
-      raw.width_mm * SVG_DPI_FACTOR
-    ).toFixed(2);
-    const heightMmCorrected = +(
-      raw.height_mm * SVG_DPI_FACTOR
-    ).toFixed(2);
+    const widthMmCorrected = +(raw.width_mm * SVG_DPI_FACTOR).toFixed(2);
+    const heightMmCorrected = +(raw.height_mm * SVG_DPI_FACTOR).toFixed(2);
 
     return {
       format: 'svg',
@@ -161,8 +182,7 @@ async function analyzeSVG(filePath) {
   }
 }
 
-
-// ---- Route multi-format ----
+// ---- Route multi-format d'analyse ----
 
 app.post('/analyze', upload.single('FILE'), async (req, res) => {
   if (!req.file) {
@@ -197,7 +217,60 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
     console.error('Analyze error:', err);
     return res.status(500).json({ error: err.message || 'Analyze failed' });
   } finally {
-    // Nettoyage du fichier uploadé
+    // Nettoyage du fichier uploadé (on n'en a plus besoin pour /analyze)
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+      console.warn('Erreur suppression fichier upload:', e.message);
+    }
+  }
+});
+
+// ---- Nouvelle route : conversion en PDF pour formats non supportés (ex: SVG / AI) ----
+
+app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ ok: false, error: 'No file uploaded' });
+  }
+
+  const filePath = req.file.path;
+  const ext = path.extname(req.file.originalname || '').toLowerCase();
+
+  try {
+    if (ext !== '.svg' && ext !== '.ai') {
+      return res
+        .status(400)
+        .json({ ok: false, error: `Conversion to PDF not implemented for ${ext}` });
+    }
+
+    const baseName = path.basename(req.file.originalname, ext);
+    const safeBase =
+      baseName.replace(/[^a-z0-9_\-]/gi, '_') || 'file';
+    const outName = `${Date.now()}_${safeBase}.pdf`;
+    const outPath = path.join(convertedDir, outName);
+
+    if (ext === '.svg') {
+      await convertSvgToPdf(filePath, outPath);
+    } else if (ext === '.ai') {
+      await convertAiToPdf(filePath, outPath);
+    }
+
+    const bbox = await runGhostscriptBBox(outPath);
+
+    return res.json({
+      ok: true,
+      pdfPath: `/converted/${outName}`,   // à préfixer côté front avec ton BACKEND_BASE
+      pdfFileName: outName,
+      format: 'pdf',
+      ...bbox
+    });
+  } catch (err) {
+    console.error('convert-to-pdf error:', err);
+    return res
+      .status(500)
+      .json({ ok: false, error: err.message || 'Convert to PDF failed' });
+  } finally {
+    // On supprime le fichier uploadé original (on garde seulement le PDF dans converted/)
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
@@ -220,4 +293,5 @@ app.use((err, req, res, next) => {
 app.listen(port, () => {
   console.log(`🛠️ Serveur prêt sur le port ${port}`);
   console.log(`📁 Upload dir: ${uploadDir}`);
+  console.log(`📁 Converted dir: ${convertedDir}`);
 });
