@@ -94,19 +94,15 @@ function runGhostscriptBBox(filePath) {
   });
 }
 
-// Recadrer un PDF sur le bounding box avec Ghostscript
-// Recadrer un PDF sur le bounding box avec Ghostscript
-// Recadrer un PDF sur un bounding box donné (sans redimensionner le contenu)
-// Recadrer un PDF sur un bounding box donné (sans redimensionner le contenu)
-// Recadrer un PDF sur un bounding box donné (sans redimensionner le contenu)
+// Recadrer un PDF sur un bounding box donné (et aligner toutes les boxes)
 function cropPdfToBbox(inputPdf, outputPdf, bbox) {
   return new Promise((resolve, reject) => {
     const { llx, lly, widthPt, heightPt } = bbox;
 
     console.log("cropPdfToBbox bbox =", bbox);
 
-    // Version simple : on fixe largeur/hauteur de la page
-    // et on décale le contenu avec PageOffset
+    // On garde DEVICEWIDTH/HEIGHT (ça marche déjà bien)
+    // et on force toutes les boxes PDF à [0 0 widthPt heightPt]
     const command =
       `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
       `-sDEVICE=pdfwrite ` +
@@ -114,7 +110,12 @@ function cropPdfToBbox(inputPdf, outputPdf, bbox) {
       `-dDEVICEHEIGHTPOINTS=${heightPt} ` +
       `-dFIXEDMEDIA ` +
       `-sOutputFile="${outputPdf}" ` +
-      `-c "<</PageOffset [-${llx} -${lly}]>> setpagedevice" ` +
+      `-c "<</PageOffset [-${llx} -${lly}] ` +
+      `/MediaBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/CropBox  [0 0 ${widthPt} ${heightPt}] ` +
+      `/BleedBox [0 0 ${widthPt} ${heightPt}] ` +
+      `/TrimBox  [0 0 ${widthPt} ${heightPt}] ` +
+      `/ArtBox   [0 0 ${widthPt} ${heightPt}]>> setpagedevice" ` +
       `-f "${inputPdf}"`;
 
     console.log("cropPdfToBbox command:", command);
@@ -129,6 +130,7 @@ function cropPdfToBbox(inputPdf, outputPdf, bbox) {
     });
   });
 }
+
 
 // Conversion SVG → PDF (via rsvg-convert)
 // /!\ Nécessite le binaire système `rsvg-convert` (paquet librsvg2-bin sous Debian/Ubuntu)
