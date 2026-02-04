@@ -97,6 +97,7 @@ function runGhostscriptBBox(filePath) {
 // Recadrer un PDF sur le bounding box avec Ghostscript
 // Recadrer un PDF sur le bounding box avec Ghostscript
 // Recadrer un PDF sur un bounding box donné (sans redimensionner le contenu)
+// Recadrer un PDF sur un bounding box donné (sans redimensionner le contenu)
 function cropPdfToBbox(inputPdf, outputPdf, bbox) {
   return new Promise((resolve, reject) => {
     const { llx, lly, widthPt, heightPt } = bbox;
@@ -133,6 +134,7 @@ function cropPdfToBbox(inputPdf, outputPdf, bbox) {
 
 
 
+
 // Conversion SVG → PDF (via rsvg-convert)
 // /!\ Nécessite le binaire système `rsvg-convert` (paquet librsvg2-bin sous Debian/Ubuntu)
 function convertSvgToPdf(svgPath, pdfPath) {
@@ -152,6 +154,7 @@ function convertSvgToPdf(svgPath, pdfPath) {
 // Conversion AI (Illustrator PDF-compatible) → PDF via Ghostscript
 // Ici on utilise -dEPSCrop pour recadrer directement sur le bounding box
 // Conversion AI (Illustrator PDF-compatible) → PDF brut via Ghostscript
+// Conversion AI (Illustrator PDF-compatible) → PDF brut via Ghostscript
 function convertAiToPdf(aiPath, pdfPath) {
   return new Promise((resolve, reject) => {
     const command =
@@ -170,6 +173,7 @@ function convertAiToPdf(aiPath, pdfPath) {
     });
   });
 }
+
 
 
 
@@ -319,17 +323,17 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
       heightPt: rawBbox.heightPt
     };
 
-    // 3) Recadrage du PDF sur ce bounding box (sans scale)
+    // 3) Recadrage sur ce bbox
     await cropPdfToBbox(tmpPdfPath, finalPdfPath, bboxForCrop);
 
-    // supprimer le PDF intermédiaire
+    // Supprimer le PDF intermédiaire
     try {
       if (fs.existsSync(tmpPdfPath)) fs.unlinkSync(tmpPdfPath);
     } catch (e) {
       console.warn("Erreur suppression tmpPdfPath:", e.message);
     }
 
-    // 4) Conversion en mm cohérente avec ce PDF (pour Q2/Q3)
+    // 4) Dimensions pour Q2 / Q3
     const widthMm = rawBbox.widthPt * 25.4 / 72;
     const heightMm = rawBbox.heightPt * 25.4 / 72;
 
@@ -363,6 +367,7 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     }
   }
 });
+
 
 
 // Petit endpoint de healthcheck
