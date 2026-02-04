@@ -303,30 +303,25 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     }
 
     // 2) Bounding box sur ce PDF brut
-    const rawBbox = await runGhostscriptBBox(tmpPdfPath);
+        const rawBbox = await runGhostscriptBBox(tmpPdfPath);
+    console.log("rawBbox convert-to-pdf =", rawBbox);
 
-    let bbox;
-    if (ext === '.svg') {
-      // 🔹 Correction 96dpi (SVG) -> 72pt (PDF)
-      const factor = 96 / 72;
-      bbox = {
-        llx: rawBbox.llx * factor,
-        lly: rawBbox.lly * factor,
-        urx: rawBbox.urx * factor,
-        ury: rawBbox.ury * factor,
-        widthPt: rawBbox.widthPt * factor,
-        heightPt: rawBbox.heightPt * factor,
-        width_mm: +(rawBbox.width_mm * factor).toFixed(2),
-        height_mm: +(rawBbox.height_mm * factor).toFixed(2),
-        source: (rawBbox.source || 'ghostscript') + '_svg_96dpi_fix'
-      };
-    } else {
-      // AI : bbox standard
-      bbox = rawBbox;
-    }
+    // 👉 Pour le recadrage, on utilise le bbox du PDF brut, SANS facteur
+    const bboxForCrop = {
+      llx: rawBbox.llx,
+      lly: rawBbox.lly,
+      urx: rawBbox.urx,
+      ury: rawBbox.ury,
+      widthPt: rawBbox.widthPt,
+      heightPt: rawBbox.heightPt
+    };
 
-    // 3) Recadrage du PDF sur ce bounding box
-    await cropPdfToBbox(tmpPdfPath, finalPdfPath, bbox);
+    // Conversion en mm cohérente avec ce PDF (pour Q2/Q3)
+    const widthMm = rawBbox.widthPt * 25.4 / 72;
+    const heightMm = rawBbox.heightPt * 25.4 / 72;
+
+    // 3) Recadrage du PDF sur ce bounding box (sans scale)
+    await cropPdfToBbox(tmpPdfPath, finalPdfPath, bboxForCrop);
 
     // On peut supprimer le PDF temporaire
     try {
@@ -338,11 +333,20 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     // 4) Réponse vers le front
     return res.json({
       ok: true,
-      pdfPath: `/converted/${outName}`,   // URL à préfixer côté Pressero
+      pdfPath: `/converted/${outName}`,
       pdfFileName: outName,
       format: 'pdf',
-      ...bbox
+      llx: rawBbox.llx,
+      lly: rawBbox.lly,
+      urx: rawBbox.urx,
+      ury: rawBbox.ury,
+      widthPt: rawBbox.widthPt,
+      heightPt: rawBbox.heightPt,
+      width_mm: +widthMm.toFixed(2),
+      height_mm: +heightMm.toFixed(2),
+      source: (rawBbox.source || 'ghostscript') + '_cropped'
     });
+
   } catch (err) {
     console.error('convert-to-pdf error:', err);
     return res
