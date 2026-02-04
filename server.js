@@ -94,6 +94,31 @@ function runGhostscriptBBox(filePath) {
   });
 }
 
+// Recadrer un PDF sur le bounding box avec Ghostscript
+function cropPdfToBbox(inputPdfPath, outputPdfPath, bbox) {
+  return new Promise((resolve, reject) => {
+    const { llx, lly, widthPt, heightPt } = bbox;
+
+    // On recadre la page et on translate le contenu de -llx, -lly
+    const command =
+      `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
+      `-sDEVICE=pdfwrite ` +
+      `-sOutputFile="${outputPdfPath}" ` +
+      `-c "<< /PageSize [${widthPt} ${heightPt}] >> setpagedevice ` +
+      `${-llx} ${-lly} translate` +
+      ` " -f "${inputPdfPath}"`;
+
+    exec(command, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Erreur Ghostscript cropPdfToBbox :', stderr || error.message);
+        return reject(new Error('PDF crop to bbox failed'));
+      }
+      resolve(outputPdfPath);
+    });
+  });
+}
+
+
 // Conversion SVG → PDF (via rsvg-convert)
 // /!\ Nécessite le binaire système `rsvg-convert` (paquet librsvg2-bin sous Debian/Ubuntu)
 function convertSvgToPdf(svgPath, pdfPath) {
@@ -244,27 +269,34 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     }
 
     const baseName = path.basename(req.file.originalname, ext);
-    const safeBase =
-      baseName.replace(/[^a-z0-9_\-]/gi, '_') || 'file';
-    const outName = `${Date.now()}_${safeBase}.pdf`;
-    const outPath = path.join(convertedDir, outName);
+    const safeBase = baseName.replace(/[^a-z0-9_\-]/gi, '_') || 'file';
 
-        if (ext === '.svg') {
-      await convertSvgToPdf(filePath, outPath);
+    // PDF final (recadré)
+    const outName = `${Date.now()}_${safeBase}.pdf`;
+    const finalPdfPath = path.join(convertedDir, outName);
+
+    // PDF intermédiaire (avant recadrage)
+    const tmpPdfPath = finalPdfPath + '.tmp';
+
+    // 1) Conversion vers un PDF "brut"
+    if (ext === '.svg') {
+      await convertSvgToPdf(filePath, tmpPdfPath);
     } else if (ext === '.ai') {
-      await convertAiToPdf(filePath, outPath);
+      await convertAiToPdf(filePath, tmpPdfPath);
     }
 
-    // On récupère le bbox "brut"
-    const rawBbox = await runGhostscriptBBox(outPath);
+    // 2) Bounding box sur ce PDF brut
+    const rawBbox = await runGhostscriptBBox(tmpPdfPath);
 
     let bbox;
     if (ext === '.svg') {
       // 🔹 Correction 96dpi (SVG) -> 72pt (PDF)
       const factor = 96 / 72;
-
       bbox = {
-        ...rawBbox,
+        llx: rawBbox.llx * factor,
+        lly: rawBbox.lly * factor,
+        urx: rawBbox.urx * factor,
+        ury: rawBbox.ury * factor,
         widthPt: rawBbox.widthPt * factor,
         heightPt: rawBbox.heightPt * factor,
         width_mm: +(rawBbox.width_mm * factor).toFixed(2),
@@ -272,25 +304,35 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         source: (rawBbox.source || 'ghostscript') + '_svg_96dpi_fix'
       };
     } else {
-      // AI (et plus tard d'autres formats) : bbox standard
+      // AI : bbox standard
       bbox = rawBbox;
     }
 
+    // 3) Recadrage du PDF sur ce bounding box
+    await cropPdfToBbox(tmpPdfPath, finalPdfPath, bbox);
+
+    // On peut supprimer le PDF temporaire
+    try {
+      if (fs.existsSync(tmpPdfPath)) fs.unlinkSync(tmpPdfPath);
+    } catch (e) {
+      console.warn('Erreur suppression tmpPdfPath:', e.message);
+    }
+
+    // 4) Réponse vers le front
     return res.json({
       ok: true,
-      pdfPath: `/converted/${outName}`,
+      pdfPath: `/converted/${outName}`,   // URL à préfixer côté Pressero
       pdfFileName: outName,
       format: 'pdf',
       ...bbox
     });
-
   } catch (err) {
     console.error('convert-to-pdf error:', err);
     return res
       .status(500)
       .json({ ok: false, error: err.message || 'Convert to PDF failed' });
   } finally {
-    // On supprime le fichier uploadé original (on garde seulement le PDF dans converted/)
+    // On supprime le fichier uploadé original (AI/SVG)
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
@@ -298,6 +340,7 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     }
   }
 });
+
 
 // Petit endpoint de healthcheck
 app.get('/', (req, res) => {
