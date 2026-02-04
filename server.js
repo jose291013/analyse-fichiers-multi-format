@@ -249,21 +249,41 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     const outName = `${Date.now()}_${safeBase}.pdf`;
     const outPath = path.join(convertedDir, outName);
 
-    if (ext === '.svg') {
+        if (ext === '.svg') {
       await convertSvgToPdf(filePath, outPath);
     } else if (ext === '.ai') {
       await convertAiToPdf(filePath, outPath);
     }
 
-    const bbox = await runGhostscriptBBox(outPath);
+    // On récupère le bbox "brut"
+    const rawBbox = await runGhostscriptBBox(outPath);
+
+    let bbox;
+    if (ext === '.svg') {
+      // 🔹 Correction 96dpi (SVG) -> 72pt (PDF)
+      const factor = 96 / 72;
+
+      bbox = {
+        ...rawBbox,
+        widthPt: rawBbox.widthPt * factor,
+        heightPt: rawBbox.heightPt * factor,
+        width_mm: +(rawBbox.width_mm * factor).toFixed(2),
+        height_mm: +(rawBbox.height_mm * factor).toFixed(2),
+        source: (rawBbox.source || 'ghostscript') + '_svg_96dpi_fix'
+      };
+    } else {
+      // AI (et plus tard d'autres formats) : bbox standard
+      bbox = rawBbox;
+    }
 
     return res.json({
       ok: true,
-      pdfPath: `/converted/${outName}`,   // à préfixer côté front avec ton BACKEND_BASE
+      pdfPath: `/converted/${outName}`,
       pdfFileName: outName,
       format: 'pdf',
       ...bbox
     });
+
   } catch (err) {
     console.error('convert-to-pdf error:', err);
     return res
