@@ -152,18 +152,27 @@ function convertSvgToPdf(svgPath, pdfPath) {
 }
 
 // Conversion AI (Illustrator PDF-compatible) → PDF via Ghostscript
+// Conversion AI (Illustrator PDF-compatible) → PDF via Ghostscript
+// Ici on utilise -dEPSCrop pour recadrer directement sur le bounding box
 function convertAiToPdf(aiPath, pdfPath) {
   return new Promise((resolve, reject) => {
-    const command = `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH -sDEVICE=pdfwrite -sOutputFile="${pdfPath}" "${aiPath}"`;
+    const command =
+      `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
+      `-sDEVICE=pdfwrite -dEPSCrop ` +
+      `-sOutputFile="${pdfPath}" ` +
+      `"${aiPath}"`;
+
     exec(command, (error, stdout, stderr) => {
       if (error) {
         console.error('Erreur Ghostscript AI->PDF :', stderr || error.message);
         return reject(new Error('AI to PDF conversion failed'));
       }
+      console.log('convertAiToPdf OK pour', pdfPath);
       resolve(pdfPath);
     });
   });
 }
+
 
 // ---- Analyseurs par type de fichier ----
 
@@ -268,8 +277,7 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
   }
 });
 
-// ---- Nouvelle route : conversion en PDF pour formats non supportés (ex: SVG / AI) ----
-
+/// ---- Nouvelle route : conversion en PDF pour formats non supportés (ex: SVG / AI) ----
 app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ ok: false, error: 'No file uploaded' });
@@ -288,64 +296,91 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     const baseName = path.basename(req.file.originalname, ext);
     const safeBase = baseName.replace(/[^a-z0-9_\-]/gi, '_') || 'file';
 
-    // PDF final (recadré)
     const outName = `${Date.now()}_${safeBase}.pdf`;
     const finalPdfPath = path.join(convertedDir, outName);
 
-    // PDF intermédiaire (avant recadrage)
-    const tmpPdfPath = finalPdfPath + '.tmp';
-
-    // 1) Conversion vers un PDF "brut"
+    // -------------------------------
+    // CAS 1 : SVG → PDF + recadrage
+    // -------------------------------
     if (ext === '.svg') {
+      const tmpPdfPath = finalPdfPath + '.tmp';
+
+      // 1) SVG -> PDF brut
       await convertSvgToPdf(filePath, tmpPdfPath);
-    } else if (ext === '.ai') {
-      await convertAiToPdf(filePath, tmpPdfPath);
+
+      // 2) bbox sur le PDF brut
+      const rawBbox = await runGhostscriptBBox(tmpPdfPath);
+      console.log("rawBbox SVG convert-to-pdf =", rawBbox);
+
+      const bboxForCrop = {
+        llx: rawBbox.llx,
+        lly: rawBbox.lly,
+        urx: rawBbox.urx,
+        ury: rawBbox.ury,
+        widthPt: rawBbox.widthPt,
+        heightPt: rawBbox.heightPt
+      };
+
+      // 3) Recadrage du PDF sur ce bbox (sans scale)
+      await cropPdfToBbox(tmpPdfPath, finalPdfPath, bboxForCrop);
+
+      // supprimer le PDF intermédiaire
+      try {
+        if (fs.existsSync(tmpPdfPath)) fs.unlinkSync(tmpPdfPath);
+      } catch (e) {
+        console.warn("Erreur suppression tmpPdfPath:", e.message);
+      }
+
+      const widthMm = rawBbox.widthPt * 25.4 / 72;
+      const heightMm = rawBbox.heightPt * 25.4 / 72;
+
+      return res.json({
+        ok: true,
+        pdfPath: `/converted/${outName}`,
+        pdfFileName: outName,
+        format: 'pdf',
+        llx: rawBbox.llx,
+        lly: rawBbox.lly,
+        urx: rawBbox.urx,
+        ury: rawBbox.ury,
+        widthPt: rawBbox.widthPt,
+        heightPt: rawBbox.heightPt,
+        width_mm: +widthMm.toFixed(2),
+        height_mm: +heightMm.toFixed(2),
+        source: (rawBbox.source || 'ghostscript') + '_svg_cropped'
+      });
     }
 
-    // 2) Bounding box sur ce PDF brut
-        const rawBbox = await runGhostscriptBBox(tmpPdfPath);
-    console.log("rawBbox convert-to-pdf =", rawBbox);
+    // -------------------------------
+    // CAS 2 : AI → PDF déjà recadré
+    // -------------------------------
+    if (ext === '.ai') {
+      // 1) AI -> PDF final recadré (via -dEPSCrop)
+      await convertAiToPdf(filePath, finalPdfPath);
 
-    // 👉 Pour le recadrage, on utilise le bbox du PDF brut, SANS facteur
-    const bboxForCrop = {
-      llx: rawBbox.llx,
-      lly: rawBbox.lly,
-      urx: rawBbox.urx,
-      ury: rawBbox.ury,
-      widthPt: rawBbox.widthPt,
-      heightPt: rawBbox.heightPt
-    };
+      // 2) bbox sur ce PDF final (qui doit correspondre à la page)
+      const bbox = await runGhostscriptBBox(finalPdfPath);
+      console.log("bbox AI final convert-to-pdf =", bbox);
 
-    // Conversion en mm cohérente avec ce PDF (pour Q2/Q3)
-    const widthMm = rawBbox.widthPt * 25.4 / 72;
-    const heightMm = rawBbox.heightPt * 25.4 / 72;
+      const widthMm = bbox.widthPt * 25.4 / 72;
+      const heightMm = bbox.heightPt * 25.4 / 72;
 
-    // 3) Recadrage du PDF sur ce bounding box (sans scale)
-    await cropPdfToBbox(tmpPdfPath, finalPdfPath, bboxForCrop);
-
-    // On peut supprimer le PDF temporaire
-    try {
-      if (fs.existsSync(tmpPdfPath)) fs.unlinkSync(tmpPdfPath);
-    } catch (e) {
-      console.warn('Erreur suppression tmpPdfPath:', e.message);
+      return res.json({
+        ok: true,
+        pdfPath: `/converted/${outName}`,
+        pdfFileName: outName,
+        format: 'pdf',
+        llx: bbox.llx,
+        lly: bbox.lly,
+        urx: bbox.urx,
+        ury: bbox.ury,
+        widthPt: bbox.widthPt,
+        heightPt: bbox.heightPt,
+        width_mm: +widthMm.toFixed(2),
+        height_mm: +heightMm.toFixed(2),
+        source: (bbox.source || 'ghostscript') + '_ai_cropped'
+      });
     }
-
-    // 4) Réponse vers le front
-    return res.json({
-      ok: true,
-      pdfPath: `/converted/${outName}`,
-      pdfFileName: outName,
-      format: 'pdf',
-      llx: rawBbox.llx,
-      lly: rawBbox.lly,
-      urx: rawBbox.urx,
-      ury: rawBbox.ury,
-      widthPt: rawBbox.widthPt,
-      heightPt: rawBbox.heightPt,
-      width_mm: +widthMm.toFixed(2),
-      height_mm: +heightMm.toFixed(2),
-      source: (rawBbox.source || 'ghostscript') + '_cropped'
-    });
 
   } catch (err) {
     console.error('convert-to-pdf error:', err);
@@ -353,7 +388,7 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
       .status(500)
       .json({ ok: false, error: err.message || 'Convert to PDF failed' });
   } finally {
-    // On supprime le fichier uploadé original (AI/SVG)
+    // on supprime le fichier AI/SVG uploadé
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
@@ -361,6 +396,24 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     }
   }
 });
+
+// Petit endpoint de healthcheck
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'analyse-fichiers-multi-format' });
+});
+
+// Middleware d’erreur global
+app.use((err, req, res, next) => {
+  console.error('Erreur globale:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+app.listen(port, () => {
+  console.log(`🛠️ Serveur prêt sur le port ${port}`);
+  console.log(`📁 Upload dir: ${uploadDir}`);
+  console.log(`📁 Converted dir: ${convertedDir}`);
+});
+
 
 
 // Petit endpoint de healthcheck
