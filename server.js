@@ -154,7 +154,7 @@ function convertAiToPdf(aiPath, pdfPath) {
   return new Promise((resolve, reject) => {
     const command =
       `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
-      `-sDEVICE=pdfwrite -dPDFSETTINGS=/prepress ` +
+      `-sDEVICE=pdfwrite ` +             // ❌ plus de -dEPSCrop ici
       `-sOutputFile="${pdfPath}" ` +
       `"${aiPath}"`;
 
@@ -168,6 +168,7 @@ function convertAiToPdf(aiPath, pdfPath) {
     });
   });
 }
+
 
 
 
@@ -285,10 +286,11 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
   }
 
   const filePath = req.file.path;
-  const ext = (path.extname(req.file.originalname || '').toLowerCase());
+  const ext = path.extname(req.file.originalname || '').toLowerCase();
 
   try {
-    if (ext !== '.svg' && ext !== '.ai') {
+    // On accepte maintenant : SVG, AI, PDF
+    if (ext !== '.svg' && ext !== '.ai' && ext !== '.pdf') {
       return res
         .status(400)
         .json({ ok: false, error: `Conversion to PDF not implemented for ${ext}` });
@@ -300,18 +302,18 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     const outName = `${Date.now()}_${safeBase}.pdf`;
     const finalPdfPath = path.join(convertedDir, outName);
 
-    // ------------------------------------------------------------------
-    // CAS 1 : SVG → PDF recadré sur le bounding box
-    // ------------------------------------------------------------------
+    // -------------------------------
+    // CAS 1 : SVG → PDF + recadrage
+    // -------------------------------
     if (ext === '.svg') {
       const tmpPdfPath = finalPdfPath + '.tmp';
 
-      // 1) SVG → PDF brut
+      // 1) SVG -> PDF brut
       await convertSvgToPdf(filePath, tmpPdfPath);
 
-      // 2) Bounding box sur le PDF brut
+      // 2) bbox sur le PDF brut
       const rawBbox = await runGhostscriptBBox(tmpPdfPath);
-      console.log("convert-to-pdf SVG rawBbox =", rawBbox);
+      console.log("rawBbox SVG convert-to-pdf =", rawBbox);
 
       const bboxForCrop = {
         llx: rawBbox.llx,
@@ -320,19 +322,18 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         heightPt: rawBbox.heightPt
       };
 
-      // 3) Recadrage du PDF sur ce bounding box
+      // 3) Recadrage du PDF sur ce bbox (sans scale)
       await cropPdfToBbox(tmpPdfPath, finalPdfPath, bboxForCrop);
 
-      // On peut supprimer le PDF brut
+      // supprimer le PDF intermédiaire
       try {
         if (fs.existsSync(tmpPdfPath)) fs.unlinkSync(tmpPdfPath);
       } catch (e) {
-        console.warn('Erreur suppression tmpPdfPath (SVG):', e.message);
+        console.warn("Erreur suppression tmpPdfPath:", e.message);
       }
 
-      // 4) Dimensions pour Q2 / Q3 (correction 96/72)
-      const widthMm = +(rawBbox.width_mm * SVG_DPI_FACTOR).toFixed(2);
-      const heightMm = +(rawBbox.height_mm * SVG_DPI_FACTOR).toFixed(2);
+      const widthMm = rawBbox.widthPt * 25.4 / 72;
+      const heightMm = rawBbox.heightPt * 25.4 / 72;
 
       return res.json({
         ok: true,
@@ -345,25 +346,44 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         ury: rawBbox.ury,
         widthPt: rawBbox.widthPt,
         heightPt: rawBbox.heightPt,
-        width_mm: widthMm,
-        height_mm: heightMm,
+        width_mm: +widthMm.toFixed(2),
+        height_mm: +heightMm.toFixed(2),
         source: (rawBbox.source || 'ghostscript') + '_svg_cropped'
       });
     }
 
-    // ------------------------------------------------------------------
-    // CAS 2 : AI → PDF simple (pas de recadrage pour l'instant)
-    // ------------------------------------------------------------------
+    // -------------------------------
+    // CAS 2 : AI → PDF + recadrage
+    // -------------------------------
     if (ext === '.ai') {
-      // 1) AI → PDF final
-      await convertAiToPdf(filePath, finalPdfPath);
+      const tmpPdfPath = finalPdfPath + '.tmp';
 
-      // 2) Bounding box sur ce PDF
-      const rawBbox = await runGhostscriptBBox(finalPdfPath);
-      console.log("convert-to-pdf AI rawBbox =", rawBbox);
+      // 1) AI -> PDF brut (page originale, sans crop)
+      await convertAiToPdf(filePath, tmpPdfPath);
 
-      const widthMm = +rawBbox.width_mm.toFixed(2);
-      const heightMm = +rawBbox.height_mm.toFixed(2);
+      // 2) bbox sur le PDF brut
+      const rawBbox = await runGhostscriptBBox(tmpPdfPath);
+      console.log("rawBbox AI convert-to-pdf =", rawBbox);
+
+      const bboxForCrop = {
+        llx: rawBbox.llx,
+        lly: rawBbox.lly,
+        widthPt: rawBbox.widthPt,
+        heightPt: rawBbox.heightPt
+      };
+
+      // 3) Recadrage du PDF sur ce bbox
+      await cropPdfToBbox(tmpPdfPath, finalPdfPath, bboxForCrop);
+
+      // supprimer le PDF intermédiaire
+      try {
+        if (fs.existsSync(tmpPdfPath)) fs.unlinkSync(tmpPdfPath);
+      } catch (e) {
+        console.warn("Erreur suppression tmpPdfPath (AI):", e.message);
+      }
+
+      const widthMm = rawBbox.widthPt * 25.4 / 72;
+      const heightMm = rawBbox.heightPt * 25.4 / 72;
 
       return res.json({
         ok: true,
@@ -376,9 +396,47 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         ury: rawBbox.ury,
         widthPt: rawBbox.widthPt,
         heightPt: rawBbox.heightPt,
-        width_mm: widthMm,
-        height_mm: heightMm,
-        source: (rawBbox.source || 'ghostscript') + '_ai_nocrop'
+        width_mm: +widthMm.toFixed(2),
+        height_mm: +heightMm.toFixed(2),
+        source: (rawBbox.source || 'ghostscript') + '_ai_cropped'
+      });
+    }
+
+    // -------------------------------
+    // CAS 3 : PDF → PDF recadré
+    // -------------------------------
+    if (ext === '.pdf') {
+      // 1) bbox sur le PDF uploadé
+      const rawBbox = await runGhostscriptBBox(filePath);
+      console.log("rawBbox PDF convert-to-pdf =", rawBbox);
+
+      const bboxForCrop = {
+        llx: rawBbox.llx,
+        lly: rawBbox.lly,
+        widthPt: rawBbox.widthPt,
+        heightPt: rawBbox.heightPt
+      };
+
+      // 2) Recadrage direct du PDF
+      await cropPdfToBbox(filePath, finalPdfPath, bboxForCrop);
+
+      const widthMm = rawBbox.widthPt * 25.4 / 72;
+      const heightMm = rawBbox.heightPt * 25.4 / 72;
+
+      return res.json({
+        ok: true,
+        pdfPath: `/converted/${outName}`,
+        pdfFileName: outName,
+        format: 'pdf',
+        llx: rawBbox.llx,
+        lly: rawBbox.lly,
+        urx: rawBbox.urx,
+        ury: rawBbox.ury,
+        widthPt: rawBbox.widthPt,
+        heightPt: rawBbox.heightPt,
+        width_mm: +widthMm.toFixed(2),
+        height_mm: +heightMm.toFixed(2),
+        source: (rawBbox.source || 'ghostscript') + '_pdf_cropped'
       });
     }
 
@@ -388,7 +446,7 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
       .status(500)
       .json({ ok: false, error: err.message || 'Convert to PDF failed' });
   } finally {
-    // On supprime toujours le fichier uploadé (SVG/AI)
+    // on supprime le fichier uploadé (AI/SVG/PDF original)
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
@@ -396,6 +454,7 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
     }
   }
 });
+
 
 
 
