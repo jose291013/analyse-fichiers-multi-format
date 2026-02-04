@@ -9,6 +9,8 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
+const { PDFDocument } = require('pdf-lib');
+
 
 // On réutilise ton analyseur EPS propre
 const { analyzeEPS } = require('./analyzers/epsAnalyzer');
@@ -93,43 +95,76 @@ function runGhostscriptBBox(filePath) {
     });
   });
 }
+async function normalizePdfBoxes(pdfPath, widthPt, heightPt) {
+  try {
+    const bytes = fs.readFileSync(pdfPath);
+    const pdfDoc = await PDFDocument.load(bytes);
+    const pages = pdfDoc.getPages();
+
+    for (const page of pages) {
+      // On force toutes les boxes à 0,0,width,height
+      page.setMediaBox(0, 0, widthPt, heightPt);
+      page.setCropBox(0, 0, widthPt, heightPt);
+      page.setBleedBox(0, 0, widthPt, heightPt);
+      page.setTrimBox(0, 0, widthPt, heightPt);
+      page.setArtBox(0, 0, widthPt, heightPt);
+    }
+
+    const newBytes = await pdfDoc.save();
+    fs.writeFileSync(pdfPath, newBytes);
+
+    console.log('normalizePdfBoxes OK pour', pdfPath);
+  } catch (e) {
+    // Non bloquant : si ça plante, on garde quand même le PDF recadré
+    console.warn('normalizePdfBoxes erreur (non bloquant):', e.message);
+  }
+}
+
 
 // Recadrer un PDF sur un bounding box donné (et aligner toutes les boxes)
 function cropPdfToBbox(inputPdf, outputPdf, bbox) {
   return new Promise((resolve, reject) => {
     const { llx, lly, widthPt, heightPt } = bbox;
 
-    console.log("cropPdfToBbox bbox =", bbox);
+    // Décalage pour ramener le contenu en (0,0)
+    const offsetX = -llx;
+    const offsetY = -lly;
 
-    // On garde DEVICEWIDTH/HEIGHT (ça marche déjà bien)
-    // et on force toutes les boxes PDF à [0 0 widthPt heightPt]
-    const command =
-      `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
+    const cmd = `${GS_CMD} -dSAFER -dNOPAUSE -dBATCH ` +
       `-sDEVICE=pdfwrite ` +
       `-dDEVICEWIDTHPOINTS=${widthPt} ` +
       `-dDEVICEHEIGHTPOINTS=${heightPt} ` +
       `-dFIXEDMEDIA ` +
       `-sOutputFile="${outputPdf}" ` +
-      `-c "<</PageOffset [-${llx} -${lly}] ` +
+      `-c "<</PageSize [${widthPt} ${heightPt}] ` +
       `/MediaBox [0 0 ${widthPt} ${heightPt}] ` +
       `/CropBox  [0 0 ${widthPt} ${heightPt}] ` +
       `/BleedBox [0 0 ${widthPt} ${heightPt}] ` +
       `/TrimBox  [0 0 ${widthPt} ${heightPt}] ` +
-      `/ArtBox   [0 0 ${widthPt} ${heightPt}]>> setpagedevice" ` +
+      `/ArtBox   [0 0 ${widthPt} ${heightPt}] ` +
+      `/PageOffset [${offsetX} ${offsetY}]>> setpagedevice" ` +
       `-f "${inputPdf}"`;
 
-    console.log("cropPdfToBbox command:", command);
+    console.log('cropPdfToBbox bbox =', bbox);
+    console.log('cropPdfToBbox command:', cmd);
 
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        console.error("Erreur cropPdfToBbox :", stderr || error.message);
-        return reject(new Error("PDF crop failed"));
+    exec(cmd, async (err, stdout, stderr) => {
+      if (err) {
+        console.error('Erreur cropPdfToBbox:', err);
+        console.error('stderr:', stderr);
+        return reject(err);
       }
-      console.log("cropPdfToBbox OK pour", outputPdf);
-      resolve(outputPdf);
+
+      console.log('cropPdfToBbox Ghostscript OK pour', outputPdf);
+
+      // 🔹 Étape 2 : on force les Media/Crop/Bleed/Trim/ArtBox dans le PDF
+      await normalizePdfBoxes(outputPdf, widthPt, heightPt);
+
+      resolve();
     });
   });
 }
+
 
 
 // Conversion SVG → PDF (via rsvg-convert)
