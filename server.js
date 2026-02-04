@@ -120,15 +120,39 @@ async function analyzeAI(filePath) {
 }
 
 // SVG : SVG -> PDF -> bbox Ghostscript
+// Facteur de correction 96 dpi (SVG) -> 72 points (PDF)
+const SVG_DPI_FACTOR = 96 / 72;
+
 async function analyzeSVG(filePath) {
   const pdfTemp = filePath + '.tmp.pdf';
+
   try {
     await convertSvgToPdf(filePath, pdfTemp);
-    const bbox = await runGhostscriptBBox(pdfTemp);
+    const raw = await runGhostscriptBBox(pdfTemp);
+
+    // Corriger les dimensions (on garde llx/lly/urx/ury pour debug si tu veux)
+    const widthPtCorrected = raw.widthPt * SVG_DPI_FACTOR;
+    const heightPtCorrected = raw.heightPt * SVG_DPI_FACTOR;
+
+    const widthMmCorrected = +(
+      raw.width_mm * SVG_DPI_FACTOR
+    ).toFixed(2);
+    const heightMmCorrected = +(
+      raw.height_mm * SVG_DPI_FACTOR
+    ).toFixed(2);
+
     return {
       format: 'svg',
       pageCount: 1,
-      ...bbox
+      llx: raw.llx,
+      lly: raw.lly,
+      urx: raw.urx,
+      ury: raw.ury,
+      widthPt: widthPtCorrected,
+      heightPt: heightPtCorrected,
+      width_mm: widthMmCorrected,
+      height_mm: heightMmCorrected,
+      source: 'svg_ghostscript_96dpi_fix'
     };
   } finally {
     if (fs.existsSync(pdfTemp)) {
@@ -136,6 +160,7 @@ async function analyzeSVG(filePath) {
     }
   }
 }
+
 
 // ---- Route multi-format ----
 
