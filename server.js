@@ -272,9 +272,8 @@ async function analyzeSVG(filePath) {
 
 function makeThumbnail(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    // 1ère page → PNG transparent, 150 dpi
     const cmd = [
-      'gs',
+      GS_CMD,              // ✅ au lieu de 'gs'
       '-dSAFER',
       '-dNOPAUSE',
       '-dBATCH',
@@ -297,6 +296,7 @@ function makeThumbnail(inputPath, outputPath) {
 }
 
 
+
 // ---- Route multi-format d'analyse ----
 
 app.post('/analyze', upload.single('FILE'), async (req, res) => {
@@ -307,30 +307,29 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
   const filePath = req.file.path;
   const ext = path.extname(req.file.originalname || '').toLowerCase();
 
-  // On prépare la variable pour l’URL de la miniature
   let thumbWebPath = null;
 
   try {
     let result;
 
-    // 👉 Ici, garde ta logique d’analyse existante
-    // Exemple suivant la structure classique que tu avais :
     if (ext === '.eps' || ext === '.ps') {
-      // analyse EPS / PS (bbox Ghostscript existant)
-      result = await analyzeEpsOrPs(filePath);
+      // On s’appuie sur ton analyseur EPS existant
+      const epsData = await analyzeEPS(filePath);
+      // On force le format pour rester cohérent
+      result = { format: 'eps', ...epsData };
     } else if (ext === '.pdf') {
-      // analyse PDF
-      result = await analyzePdf(filePath);
+      result = await analyzePDF(filePath);
     } else if (ext === '.ai') {
-      // si tu fais analyse directe AI ici
-      result = await analyzeAi(filePath);
+      result = await analyzeAI(filePath);
     } else if (ext === '.svg') {
-      result = await analyzeSvg(filePath);
+      result = await analyzeSVG(filePath);
     } else {
-      return res.status(400).json({ error: `Format non supporté pour /analyze: ${ext}` });
+      return res
+        .status(400)
+        .json({ error: `Format non supporté pour /analyze: ${ext}` });
     }
 
-    // 🔹 Génération de la miniature pour EPS / PS / PDF (et éventuellement d’autres formats)
+    // Miniature pour EPS / PS / PDF
     if (['.eps', '.ps', '.pdf'].includes(ext)) {
       const baseName = path.basename(req.file.originalname || '', ext);
       const safeBase = (baseName || 'file').replace(/[^a-z0-9_\-]/gi, '_');
@@ -338,14 +337,10 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
       const thumbName = `${Date.now()}_${safeBase}.png`;
       const thumbPath = path.join(thumbsDir, thumbName);
 
-      // Utilise bien le helper makeThumbnail qu’on a ajouté plus haut
       await makeThumbnail(filePath, thumbPath);
-
-      // Chemin public servi par app.use('/thumbnails', express.static(thumbsDir));
       thumbWebPath = `/thumbnails/${thumbName}`;
     }
 
-    // 🔹 Réponse standardisée + thumbnailPath si disponible
     return res.json({
       fileName: req.file.originalname,
       ...result,
@@ -356,7 +351,6 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
     console.error('Analyze error:', err);
     return res.status(500).json({ error: err.message || 'Analyze failed' });
   } finally {
-    // Nettoyage du fichier uploadé (on n'en a plus besoin pour /analyze)
     try {
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     } catch (e) {
@@ -364,6 +358,7 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
     }
   }
 });
+
 
 
 /// ---- Nouvelle route : conversion en PDF pour formats non supportés (ex: SVG / AI) ----
@@ -422,8 +417,19 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         console.warn("Erreur suppression tmpPdfPath:", e.message);
       }
 
-      const widthMm = rawBbox.widthPt * 25.4 / 72;
+            const widthMm = rawBbox.widthPt * 25.4 / 72;
       const heightMm = rawBbox.heightPt * 25.4 / 72;
+
+      // 🔹 Miniature à partir du PDF final recadré
+      let thumbWebPath = null;
+      try {
+        const thumbName = `${Date.now()}_${safeBase}.png`;
+        const thumbPath = path.join(thumbsDir, thumbName);
+        await makeThumbnail(finalPdfPath, thumbPath);
+        thumbWebPath = `/thumbnails/${thumbName}`;
+      } catch (e) {
+        console.warn('Impossible de générer la miniature SVG :', e.message);
+      }
 
       return res.json({
         ok: true,
@@ -438,8 +444,10 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         heightPt: rawBbox.heightPt,
         width_mm: +widthMm.toFixed(2),
         height_mm: +heightMm.toFixed(2),
-        source: (rawBbox.source || 'ghostscript') + '_svg_cropped'
+        source: (rawBbox.source || 'ghostscript') + '_svg_cropped',
+        ...(thumbWebPath ? { thumbnailPath: thumbWebPath } : {})
       });
+
     }
 
     // -------------------------------
@@ -472,8 +480,19 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         console.warn("Erreur suppression tmpPdfPath (AI):", e.message);
       }
 
-      const widthMm = rawBbox.widthPt * 25.4 / 72;
+            const widthMm = rawBbox.widthPt * 25.4 / 72;
       const heightMm = rawBbox.heightPt * 25.4 / 72;
+
+      // 🔹 Miniature à partir du PDF final recadré
+      let thumbWebPath = null;
+      try {
+        const thumbName = `${Date.now()}_${safeBase}.png`;
+        const thumbPath = path.join(thumbsDir, thumbName);
+        await makeThumbnail(finalPdfPath, thumbPath);
+        thumbWebPath = `/thumbnails/${thumbName}`;
+      } catch (e) {
+        console.warn('Impossible de générer la miniature AI :', e.message);
+      }
 
       return res.json({
         ok: true,
@@ -488,8 +507,10 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         heightPt: rawBbox.heightPt,
         width_mm: +widthMm.toFixed(2),
         height_mm: +heightMm.toFixed(2),
-        source: (rawBbox.source || 'ghostscript') + '_ai_cropped'
+        source: (rawBbox.source || 'ghostscript') + '_ai_cropped',
+        ...(thumbWebPath ? { thumbnailPath: thumbWebPath } : {})
       });
+
     }
 
     // -------------------------------
