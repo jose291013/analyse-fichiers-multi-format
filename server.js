@@ -10,16 +10,17 @@ const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 const { PDFDocument } = require('pdf-lib');
-
-
 // On réutilise ton analyseur EPS propre
 const { analyzeEPS } = require('./analyzers/epsAnalyzer');
-
 // Choix de la commande Ghostscript selon OS
 const GS_CMD = process.platform === 'win32' ? 'gswin64c' : 'gs';
-
 const app = express();
 const port = process.env.PORT || 3000;
+const thumbsDir = path.join(__dirname, 'thumbnails');
+fs.mkdirSync(thumbsDir, { recursive: true });
+
+app.use('/thumbnails', express.static(thumbsDir));
+
 
 app.use(cors());
 app.use(express.json());
@@ -269,6 +270,33 @@ async function analyzeSVG(filePath) {
   }
 }
 
+function makeThumbnail(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    // 1ère page → PNG transparent, 150 dpi
+    const cmd = [
+      'gs',
+      '-dSAFER',
+      '-dNOPAUSE',
+      '-dBATCH',
+      '-sDEVICE=pngalpha',
+      '-r150',
+      '-dFirstPage=1',
+      '-dLastPage=1',
+      `-sOutputFile="${outputPath}"`,
+      `"${inputPath}"`
+    ].join(' ');
+
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Erreur Ghostscript thumbnail:', stderr || error.message);
+        return reject(error);
+      }
+      resolve();
+    });
+  });
+}
+
+
 // ---- Route multi-format d'analyse ----
 
 app.post('/analyze', upload.single('FILE'), async (req, res) => {
@@ -279,27 +307,51 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
   const filePath = req.file.path;
   const ext = path.extname(req.file.originalname || '').toLowerCase();
 
+  // On prépare la variable pour l’URL de la miniature
+  let thumbWebPath = null;
+
   try {
     let result;
 
+    // 👉 Ici, garde ta logique d’analyse existante
+    // Exemple suivant la structure classique que tu avais :
     if (ext === '.eps' || ext === '.ps') {
-      // EPS via ton epsAnalyzer propre
-      result = await analyzeEPS(filePath);
+      // analyse EPS / PS (bbox Ghostscript existant)
+      result = await analyzeEpsOrPs(filePath);
     } else if (ext === '.pdf') {
-      result = await analyzePDF(filePath);
+      // analyse PDF
+      result = await analyzePdf(filePath);
     } else if (ext === '.ai') {
-      result = await analyzeAI(filePath);
+      // si tu fais analyse directe AI ici
+      result = await analyzeAi(filePath);
     } else if (ext === '.svg') {
-      result = await analyzeSVG(filePath);
+      result = await analyzeSvg(filePath);
     } else {
-      return res.status(400).json({ error: `Unsupported file type: ${ext}` });
+      return res.status(400).json({ error: `Format non supporté pour /analyze: ${ext}` });
     }
 
-    // Réponse standardisée
+    // 🔹 Génération de la miniature pour EPS / PS / PDF (et éventuellement d’autres formats)
+    if (['.eps', '.ps', '.pdf'].includes(ext)) {
+      const baseName = path.basename(req.file.originalname || '', ext);
+      const safeBase = (baseName || 'file').replace(/[^a-z0-9_\-]/gi, '_');
+
+      const thumbName = `${Date.now()}_${safeBase}.png`;
+      const thumbPath = path.join(thumbsDir, thumbName);
+
+      // Utilise bien le helper makeThumbnail qu’on a ajouté plus haut
+      await makeThumbnail(filePath, thumbPath);
+
+      // Chemin public servi par app.use('/thumbnails', express.static(thumbsDir));
+      thumbWebPath = `/thumbnails/${thumbName}`;
+    }
+
+    // 🔹 Réponse standardisée + thumbnailPath si disponible
     return res.json({
       fileName: req.file.originalname,
-      ...result
+      ...result,
+      ...(thumbWebPath ? { thumbnailPath: thumbWebPath } : {})
     });
+
   } catch (err) {
     console.error('Analyze error:', err);
     return res.status(500).json({ error: err.message || 'Analyze failed' });
@@ -312,6 +364,7 @@ app.post('/analyze', upload.single('FILE'), async (req, res) => {
     }
   }
 });
+
 
 /// ---- Nouvelle route : conversion en PDF pour formats non supportés (ex: SVG / AI) ----
 /// ---- Nouvelle route : conversion en PDF pour formats non supportés (ex: SVG / AI) ----
@@ -460,6 +513,13 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
       const widthMm = rawBbox.widthPt * 25.4 / 72;
       const heightMm = rawBbox.heightPt * 25.4 / 72;
 
+      // 3) Générer la miniature PNG à partir du PDF final recadré
+const thumbName = `${Date.now()}_${safeBase}.png`;
+const thumbPath = path.join(thumbsDir, thumbName);
+await makeThumbnail(finalPdfPath, thumbPath);
+const thumbWebPath = `/thumbnails/${thumbName}`;
+
+
       return res.json({
         ok: true,
         pdfPath: `/converted/${outName}`,
@@ -473,7 +533,8 @@ app.post('/convert-to-pdf', upload.single('FILE'), async (req, res) => {
         heightPt: rawBbox.heightPt,
         width_mm: +widthMm.toFixed(2),
         height_mm: +heightMm.toFixed(2),
-        source: (rawBbox.source || 'ghostscript') + '_pdf_cropped'
+        source: (rawBbox.source || 'ghostscript') + '_pdf_cropped',
+        thumbnailPath: thumbWebPath      // 👈 nouveau
       });
     }
 
